@@ -1,0 +1,837 @@
+"use client";
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  Box,
+  Typography,
+  Button,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  Radio,
+  RadioGroup,
+  FormControlLabel,
+  FormControl,
+  Checkbox,
+  TextField,
+  Chip,
+  CircularProgress
+} from '@mui/material';
+import {
+  ExpandMore as ExpandMoreIcon,
+  Done as DoneIcon,
+  HourglassBottom as HourglassBottomIcon,
+  ArrowBack as ArrowBackIcon,
+  DoneAll as DoneAllIcon,
+} from '@mui/icons-material';
+import { useMutation } from '@apollo/client';
+import { UPDATE_ASSESSMENT_MUTATION, UpdateAssessmentData, UpdateAssessmentInput } from '../../../graphql/templates.service';
+import { getTemplatesData } from '../../../utils/templatesStore';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useLazyQuery } from '@apollo/client';
+import { toast } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
+import DashboardLayout from '../../../components/layout/DashboardLayout';
+import { GET_ASSESSMENT_QUERY } from '../../../graphql/templates.service';
+
+interface Answer {
+  questionId: string;
+  answer: string | string[];
+  questionText: string;
+  questionType: string;
+  options?: string[];
+  isRequired?: boolean;
+}
+
+interface Section {
+  id: string;
+  name: string;
+  answers: Answer[];
+  isCompleted: boolean;
+}
+
+interface AssessmentData {
+  assessmentId: string;
+  userId: string;
+  facilityId: string;
+  service_id: string[];
+  sections: {
+    sectionId: string;
+    sectionName: string;
+    sectionIndex: number;
+    questionnaire: {
+      nodes: Array<{
+        id: string;
+        type: string;
+        data: {
+          question: string;
+          questionType: string;
+          options: string[];
+          isRequired: boolean;
+          optionsData: Array<{
+            text: string;
+            score: string;
+            referralText: string;
+          }>;
+        };
+      }>;
+    };
+    answers: Array<{
+      questionId: string;
+      answer: string | string[];
+      answeredAt: string;
+    }>;
+    progress: {
+      currentQuestionIndex: number;
+      totalQuestionsInSection: number;
+      answeredQuestionsInSection: number;
+    };
+  }[];
+  overallProgress: {
+    currentSectionIndex: number;
+    totalSections: number;
+    overallProgress: number;
+    totalQuestions: number;
+    answeredQuestions: number;
+  };
+}
+
+interface GetAssessmentResponse {
+  getAssessment: {
+    status: string;
+    message: string;
+    statusCode: number;
+    assessment: AssessmentData;
+    error: string | null;
+  };
+}
+
+const AssessmentReview = () => {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const assessmentId = searchParams.get('id');
+  
+  console.log('Component rendered, searchParams:', searchParams);
+  console.log('assessmentId extracted:', assessmentId);
+  
+  const [sections, setSections] = useState<Section[]>([]);
+  const [expandedSection, setExpandedSection] = useState<string>('');
+  
+  // Assessment data state
+  const [userId, setUserId] = useState<string>('');
+  const [facilityId, setFacilityId] = useState<string>('');
+  const [sectionVersionId, setSectionVersionId] = useState<string>('');
+
+  // Update assessment mutation
+  const [updateAssessment] = useMutation<UpdateAssessmentData>(UPDATE_ASSESSMENT_MUTATION);
+
+  useEffect(() => {
+    // Load assessment data from templates store
+    const templatesData = getTemplatesData();
+    console.log('🔍 Templates store data:', templatesData);
+    
+    if (templatesData?.assessment) {
+      const assessmentData = templatesData.assessment;
+      console.log('📊 Assessment data from store:', assessmentData);
+      
+      // setAssessmentId(assessmentData._id);
+      setUserId(assessmentData.userId || '');
+      setFacilityId(assessmentData.facilityId || '');
+      
+      if (assessmentData.questionnaire && assessmentData.questionnaire.length > 0) {
+        setSectionVersionId(assessmentData.questionnaire[0].sectionVersionId);
+      }
+    } else {
+      console.log('⚠️ No assessment data found in store');
+    }
+  }, []);
+
+  const [assessmentData, setAssessmentData] = useState<AssessmentData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // GraphQL query to fetch assessment data
+  const [getAssessment, { loading: queryLoading }] = useLazyQuery<GetAssessmentResponse>(
+    GET_ASSESSMENT_QUERY,
+    {
+      variables: { assessmentId },
+      fetchPolicy: 'cache-and-network',
+      onError: (error) => {
+        console.error('Error fetching assessment:', error);
+        toast.error('Failed to load assessment. Please try again.');
+        setLoading(false);
+      }
+    }
+  )
+
+  const transformQuestionnaireToAnswers = useCallback((nodes: Array<{
+    id: string;
+    data: {
+      question: string;
+      questionType: string;
+      options: string[];
+      isRequired: boolean;
+    };
+  }>, existingAnswers: Array<{
+    questionId: string;
+    answer: string | string[];
+  }>): Answer[] => {
+    // Only process questions that have answers
+    const answers: Answer[] = [];
+    
+    existingAnswers.forEach((existingAnswer) => {
+      // Find the corresponding question node
+      const questionNode = nodes.find(node => node.id === existingAnswer.questionId);
+      
+      if (questionNode && questionNode.data && questionNode.data.question) {
+        answers.push({
+          questionId: existingAnswer.questionId,
+          questionText: questionNode.data.question,
+          questionType: questionNode.data.questionType || 'text',
+          options: questionNode.data.options || [],
+          isRequired: questionNode.data.isRequired || false,
+          answer: existingAnswer.answer
+        });
+      }
+    });
+    
+    return answers;
+  }, []);
+
+  const fetchAssessmentData = useCallback(() => {
+    (async () => {
+      try {
+        console.log('Starting fetchAssessmentData for assessmentId:', assessmentId);
+        setLoading(true);
+        const { data, error } = await getAssessment();
+        
+        console.log('Assessment query result:', { data, error });
+        
+        if (error) {
+          console.error('GraphQL error:', error);
+          toast.error(`Failed to load assessment: ${error.message}`);
+          return;
+        }
+        
+        if (data?.getAssessment?.status === 'success' && data.getAssessment.assessment) {
+          const assessment = data.getAssessment.assessment;
+          console.log('Assessment data received:', assessment);
+          setAssessmentData(assessment);
+          
+          // Transform API data to match UI structure
+          const transformedSections = assessment.sections
+            .filter(section => section.questionnaire?.nodes && section.questionnaire.nodes.length > 0)
+            .map(section => ({
+              id: section.sectionId || `section-${section.sectionIndex || 0}`,
+              name: section.sectionName || `Section ${(section.sectionIndex || 0) + 1}`,
+              isCompleted: (section.progress?.answeredQuestionsInSection || 0) > 0,
+              answers: transformQuestionnaireToAnswers(section.questionnaire.nodes, section.answers || [])
+            }))
+            .filter(section => section.answers.length > 0); // Only include sections with answered questions
+          
+          console.log('Transformed sections:', transformedSections);
+          setSections(transformedSections);
+          
+          // Set first section as expanded by default
+          if (transformedSections.length > 0) {
+            setExpandedSection(transformedSections[0].id);
+          }
+        } else {
+          console.error('Assessment query failed:', data?.getAssessment);
+          
+          // Try to load from localStorage as fallback
+          console.log('Attempting to load from localStorage as fallback');
+          const savedAnswers = JSON.parse(localStorage.getItem('assessmentAnswers') || '{}');
+          const savedSections = JSON.parse(localStorage.getItem('assessmentSections') || '[]');
+          
+          if (savedSections.length > 0) {
+            console.log('Loading from localStorage:', { savedAnswers, savedSections });
+            setSections(savedSections);
+            if (savedSections.length > 0) {
+              setExpandedSection(savedSections[0].id);
+            }
+          } else {
+            toast.error(data?.getAssessment?.message || 'Failed to load assessment');
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching assessment:', error);
+        toast.error('Failed to load assessment. Please try again.');
+      } finally {
+        console.log('Setting loading to false');
+        setLoading(false);
+      }
+    })();
+  }, [assessmentId, getAssessment, transformQuestionnaireToAnswers]);
+
+  const getDefaultAnswer = (questionType: string, options: string[]): string | string[] => {
+    switch (questionType) {
+      case 'radio':
+        return options.length > 0 ? options[0] : '';
+      case 'checkbox':
+        return [];
+      case 'text-input':
+      case 'text':
+      case 'textarea':
+        return '';
+      case 'number':
+        return '0';
+      default:
+        return '';
+    }
+  };
+
+  const handleSectionToggle = (sectionId: string) => {
+    setExpandedSection(expandedSection === sectionId ? '' : sectionId);
+  };
+
+  const handleResumeAssessment = () => {
+    if (assessmentId) {
+      router.push(`/assessment/new?id=${assessmentId}`);
+    } else {
+      router.push('/assessment/new');
+    }
+  };
+
+  const handleSubmitAssessment = async () => {
+    if (!assessmentId) {
+      console.error('Missing required assessment data: assessmentId');
+      return;
+    }
+
+    // Get userId and facilityId from assessment data or store
+    const currentUserId = userId || assessmentData?.userId || '';
+    const currentFacilityId = facilityId || assessmentData?.facilityId || '';
+
+    console.log('🔍 Assessment data sources:', {
+      assessmentId,
+      userId: currentUserId,
+      facilityId: currentFacilityId,
+      fromStore: { userId, facilityId },
+      fromAssessmentData: { userId: assessmentData?.userId, facilityId: assessmentData?.facilityId }
+    });
+
+    try {
+      console.log('🔄 Submitting assessment...');
+      
+      // Get all answers from sections
+      const allAnswers = sections.flatMap(section => 
+        section.answers.map(answer => {
+          // Extract original question ID from prefixed ID
+          // template-0-1 -> 1, template-1-2 -> 2, etc.
+          // Handle both template-X-Y and template-X-Y-Z formats
+          const originalQuestionId = answer.questionId.replace(/^template-\d+-/, '');
+          
+          console.log(`🔄 Review Question ID transformation: ${answer.questionId} -> ${originalQuestionId}`);
+          
+          return {
+            questionId: originalQuestionId,
+            answer: Array.isArray(answer.answer) ? answer.answer.join(', ') : (answer.answer || ''),
+            answeredAt: new Date().toISOString()
+          };
+        })
+      );
+
+      // Check if any question had a referral end action triggered
+      const referralFlags = JSON.parse(localStorage.getItem('assessmentReferralFlags') || '{}');
+      const hasReferral = Object.keys(referralFlags).some(questionId => 
+        referralFlags[questionId] && referralFlags[questionId].hasReferral
+      );
+      
+      console.log('🔍 Referral flags check:', { referralFlags, hasReferral });
+
+      const status = hasReferral ? 'blocked' : 'completed';
+      console.log(`📊 Status determined: ${status} (hasReferral: ${hasReferral})`);
+      console.log(`📊 Any referral text in optionsData triggers blocked status`);
+
+      // Calculate progress
+      const totalQuestions = allAnswers.length;
+      const answeredQuestions = allAnswers.filter(answer => answer.answer).length;
+      const overallProgress = totalQuestions > 0 ? Math.round((answeredQuestions / totalQuestions) * 100) : 100;
+
+      // Create questionnaire section
+      const questionnaireSection = {
+        sectionVersionId: sectionVersionId || '68b18619e0337e146a5230bf',
+        answers: allAnswers,
+        progress: {
+          currentQuestionIndex: totalQuestions - 1,
+          totalQuestionsInSection: totalQuestions,
+          answeredQuestionsInSection: answeredQuestions
+        }
+      };
+
+      // Create overall progress
+      const overallProgressData = {
+        currentSectionIndex: sections.length - 1,
+        totalSections: sections.length,
+        overallProgress,
+        totalQuestions,
+        answeredQuestions
+      };
+
+      const updateInput: UpdateAssessmentInput = {
+        questionnaire: [questionnaireSection],
+        status,
+        overallProgress: overallProgressData
+      };
+
+      console.log('📊 Submit input:', updateInput);
+
+      const result = await updateAssessment({
+        variables: {
+          assessmentId,
+          input: updateInput
+        }
+      });
+
+      console.log('✅ Assessment submitted successfully:', result.data);
+      
+      if (result.data?.updateAssessment.status === 'success') {
+        // Navigate to assessment list
+        router.push('/assessment');
+      }
+
+    } catch (error) {
+      console.error('❌ Error submitting assessment:', error);
+      toast.error('Failed to submit assessment. Please try again.');
+    }
+  };
+
+  const getCompletionPercentage = () => {
+    if (!assessmentData) return 0;
+    
+    // Calculate completion percentage based on answered questions vs total questions
+    const totalQuestions = assessmentData.overallProgress.totalQuestions || 0;
+    const answeredQuestions = assessmentData.overallProgress.answeredQuestions || 0;
+    
+    if (totalQuestions === 0) return 0;
+    return Math.round((answeredQuestions / totalQuestions) * 100);
+  };
+
+  // useEffect to fetch assessment data when component mounts
+  useEffect(() => {
+    console.log('useEffect triggered, assessmentId:', assessmentId);
+    console.log('searchParams:', searchParams);
+    
+    if (assessmentId && assessmentId.trim() !== '') {
+      console.log('Fetching assessment data for ID:', assessmentId);
+      fetchAssessmentData();
+    } else if (assessmentId === null) {
+      // Still waiting for searchParams to be available
+      console.log('Still waiting for searchParams to be available');
+      return;
+    } else {
+      // No assessment ID provided in URL
+      console.error('No assessment ID found in URL. Expected format: /assessment/review?id=ASSESSMENT_ID');
+      toast.error('Assessment ID is required. Please navigate to this page with a valid assessment ID.');
+      
+      // Wait a bit before redirecting to show the error message
+      setTimeout(() => {
+        router.push('/assessment');
+      }, 2000);
+    }
+  }, [assessmentId, searchParams, fetchAssessmentData, router]);
+
+  // Add timeout to prevent infinite loading
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      if (loading) {
+        console.log('Loading timeout reached, setting loading to false');
+        setLoading(false);
+        toast.error('Loading timeout. Please try refreshing the page.');
+      }
+    }, 10000); // 10 second timeout
+
+    return () => clearTimeout(timeout);
+  }, [loading]);
+
+  const renderAnswer = (answer: Answer) => {
+    switch (answer.questionType) {
+      case 'radio':
+        return (
+          <FormControl component="fieldset" disabled>
+            <RadioGroup value={answer.answer || ''}>
+              {(answer.options || []).map((option, index) => (
+                <FormControlLabel
+                  key={index}
+                  value={option}
+                  control={<Radio size="small" sx={{
+                    '&.Mui-checked': {
+                      color: '#3b82f6',
+                    },
+                    '&:hover': {
+                      backgroundColor: 'rgba(59, 130, 246, 0.04)',
+                    },
+                  }} />}
+                  label={option || 'Unknown option'}
+                  sx={{
+                    '& .MuiFormControlLabel-label': {
+                      fontSize: '14px',
+                      color: '#111827'
+                    },
+                    '& .MuiFormControlLabel-label.Mui-disabled': {
+                      color: 'black'
+                    }
+                  }}
+                />
+              ))}
+            </RadioGroup>
+          </FormControl>
+        );
+      case 'checkbox':
+        return (
+          <Box>
+            {Array.isArray(answer.answer) ? (answer.answer || []).map((item, index) => (
+              <FormControlLabel
+                key={index}
+                control={<Checkbox checked={!!item} disabled size="small" />}
+                label={item || 'Unknown option'}
+                sx={{
+                  display: 'block',
+                  '& .MuiFormControlLabel-label': {
+                    fontSize: '14px',
+                    color: '#374151'
+                  }
+                }}
+              />
+            )) : (
+              <FormControlLabel
+                control={<Checkbox checked={!!answer.answer} disabled size="small" />}
+                label={answer.answer || 'No answer'}
+                sx={{
+                  '& .MuiFormControlLabel-label': {
+                    fontSize: '14px',
+                    color: '#374151'
+                  }
+                }}
+              />
+            )}
+          </Box>
+        );
+      case 'text-input':
+      case 'text':
+        return (
+          <TextField
+            value={answer.answer || ''}
+            disabled
+            multiline
+            fullWidth
+            variant="outlined"
+            size="small"
+            sx={{
+              '& .MuiOutlinedInput-root': {
+                backgroundColor: '#f9fafb',
+                fontSize: '14px'
+              }
+            }}
+          />
+        );
+      case 'textarea':
+        return (
+          <TextField
+            value={answer.answer || ''}
+            disabled
+            multiline
+            rows={4}
+            fullWidth
+            variant="outlined"
+            size="small"
+            sx={{
+              '& .MuiOutlinedInput-root': {
+                backgroundColor: '#f9fafb',
+                fontSize: '14px'
+              }
+            }}
+          />
+        );
+      case 'number':
+        return (
+          <TextField
+            value={answer.answer || 0}
+            disabled
+            type="number"
+            fullWidth
+            variant="outlined"
+            size="small"
+            sx={{
+              '& .MuiOutlinedInput-root': {
+                backgroundColor: '#f9fafb',
+                fontSize: '14px'
+              }
+            }}
+          />
+        );
+      default:
+        return (
+          <Typography sx={{ fontSize: '14px', color: '#374151', fontStyle: 'italic' }}>
+            {answer.answer || 'No answer provided'}
+          </Typography>
+        );
+    }
+  };
+
+  // Show loading while waiting for search params or during data fetch
+  if (assessmentId === null || loading || queryLoading) {
+    return (
+      <DashboardLayout>
+        <Box sx={{ 
+          height: "100%", 
+          backgroundColor: "#f8fafc", 
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center"
+        }}>
+          <CircularProgress />
+        </Box>
+      </DashboardLayout>
+    );
+  }
+
+  if (!assessmentData) {
+    return (
+      <DashboardLayout>
+        <Box sx={{ 
+          height: "100%", 
+          backgroundColor: "#f8fafc", 
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          alignItems: "center",
+          gap: 2
+        }}>
+          <Typography variant="h6" color="#6b7280">No assessment data found</Typography>
+
+        </Box>
+      </DashboardLayout>
+    );
+  }
+
+  return (
+    <DashboardLayout>
+      <Box sx={{ 
+        height: "100%", 
+        backgroundColor: "#f8fafc", 
+        overflow: "auto",
+        '&::-webkit-scrollbar': {
+          width: '8px',
+        },
+        '&::-webkit-scrollbar-track': {
+          background: '#f1f1f1',
+          borderRadius: '4px',
+        },
+        '&::-webkit-scrollbar-thumb': {
+          background: '#3b82f6',
+          borderRadius: '4px',
+          '&:hover': {
+            background: '#2563eb',
+          },
+        },
+      }}>
+        {/* Sticky Header */}
+        <Box sx={{ backgroundColor: "transparent", position: "sticky", top: 0, zIndex: 10 }}>
+          <Box sx={{ px: 0, pt: 0, pb: 1, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <Box>
+              <Typography variant="h5" fontWeight={600} fontFamily={"var(--font-inter), sans-serif"} sx={{ color: "#111827" }}>
+                Assessment Name Goes Here
+              </Typography>
+              <Typography variant="subtitle1" color="#6c757d" fontFamily={"var(--font-inter), sans-serif"}>
+                City General Hospital - Started On Jun 26, 2025
+              </Typography>
+            </Box>
+            <Chip
+              label={`In Progress - ${getCompletionPercentage()}%`}
+              sx={{
+                backgroundColor: "#faf5e3",
+                color: "#eabf3f",
+                fontWeight: 700,
+                borderRadius: "8px",
+                px: 1.5,
+                height: 32,
+              }}
+            />
+          </Box>
+        </Box>
+
+
+        {/* Main Content Card */}
+        <Box
+          sx={{
+            borderColor: "#e5e7eb",
+            borderRadius: 2,
+            boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+            mt: 2,
+            display: "flex",
+            flexDirection: "column",
+            backgroundColor: "#fff",
+            border: "1px solid #e5e7eb"
+          }}
+        >
+          {/* Sections */}
+          <Box sx={{ p: 2.5, pt: 3 }}>
+            {sections.length > 0 ? sections.map((section) => (
+              <Accordion
+                key={section.id}
+                expanded={expandedSection === section.id}
+                onChange={() => handleSectionToggle(section.id)}
+                sx={{
+                  mb: 2,
+                  borderRadius: '8px !important',
+                  border: '1px solid #e5e7eb',
+                  boxShadow: 'none',
+                  '&:before': {
+                    display: 'none'
+                  },
+                  '&.Mui-expanded': {
+                    margin: '0 0 16px 0'
+                  }
+                }}
+              >
+                <AccordionSummary
+                  expandIcon={<ExpandMoreIcon sx={{ 
+                    color: section.isCompleted ? '#4cb054' : '#e9b825',
+                    fontSize: '24px'
+                  }} />}
+                  sx={{
+                    backgroundColor: section.isCompleted ? '#f6fbf6' : '#fefbf2',
+                    borderRadius: '8px',
+                    minHeight: '56px',
+                    '&.Mui-expanded': {
+                      borderBottomLeftRadius: 0,
+                      borderBottomRightRadius: 0,
+                      minHeight: '56px',
+                      backgroundColor: section.isCompleted ? '#e4f3e6' : '#fefbf2'
+                    },
+                    '& .MuiAccordionSummary-content': {
+                      alignItems: 'center',
+                      margin: '12px 0'
+                    },
+                    '& .MuiAccordionSummary-content.Mui-expanded': {
+                      margin: '12px 0'
+                    }
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    {section.isCompleted ? (
+                      <DoneIcon sx={{ color: '#4cb054', fontSize: '24px' }} />
+                    ) : (
+                      <HourglassBottomIcon sx={{ color: '#e9b825', fontSize: '24px' }} />
+                    )}
+                    <Typography sx={{
+                      fontWeight: 600,
+                      fontSize: '16px',
+                      color: section.isCompleted ? '#4cb054' : '#e9b825',
+                      fontFamily: 'var(--font-inter), sans-serif'
+                    }}>
+                      {section.name}
+                    </Typography>
+                  </Box>
+                </AccordionSummary>
+                <AccordionDetails sx={{ p: 3, backgroundColor: '#f6fbf6' }}>
+                  {section.answers.length > 0 ? (
+                    <Box>
+                      {section.answers.map((answer, answerIndex) => (
+                        <Box key={answer.questionId} sx={{ mb: 4 }}>
+                          <Typography sx={{
+                            fontSize: "18px",
+                            fontWeight: 600,
+                            mb: 3,
+                            color: "#1f2937",
+                            lineHeight: 1.5,
+                            fontFamily: 'var(--font-inter), sans-serif'
+                          }}>
+                            {answerIndex + 1}. {answer.questionText || 'Question text not available'}
+                            {answer.isRequired && (
+                              <span style={{ color: '#ef4444' }}> *</span>
+                            )}
+                          </Typography>
+                          <Box sx={{ ml: 2 }}>
+                            {renderAnswer(answer)}
+                          </Box>
+                        </Box>
+                      ))}
+                    </Box>
+                  ) : (
+                    <Typography sx={{ 
+                      color: '#6b7280', 
+                      fontStyle: 'italic',
+                      fontFamily: 'var(--font-inter), sans-serif'
+                    }}>
+                      No questions answered in this section yet.
+                    </Typography>
+                  )}
+                </AccordionDetails>
+              </Accordion>
+            )) : (
+              <Typography sx={{ 
+                color: '#6b7280', 
+                fontStyle: 'italic',
+                fontFamily: 'var(--font-inter), sans-serif',
+                textAlign: 'center',
+                py: 4
+              }}>
+                No answered questions found in this assessment. Please complete some questions first.
+              </Typography>
+            )}
+          </Box>
+
+          {/* Action Buttons */}
+          <Box sx={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            p: 2.5,
+            borderTop: '1px solid #e5e7eb',
+            backgroundColor: '#fff'
+          }}>
+            <Button
+              onClick={handleResumeAssessment}
+              variant="outlined"
+              startIcon={<ArrowBackIcon />}
+              sx={{
+                textTransform: 'none',
+                fontWeight: 600,
+                borderRadius: '8px',
+                px: 3,
+                py: 1.5,
+                borderColor: '#3b82f6',
+                color: '#3b82f6',
+                fontFamily: 'var(--font-inter), sans-serif',
+                '&:hover': {
+                  borderColor: '#2563eb',
+                  backgroundColor: 'rgba(59, 130, 246, 0.04)'
+                }
+              }}
+            >
+              Resume Assessment
+            </Button>
+
+            <Button
+              onClick={handleSubmitAssessment}
+              variant="contained"
+              disabled={getCompletionPercentage() < 100}
+              endIcon={<DoneAllIcon />}
+              sx={{
+                textTransform: 'none',
+                fontWeight: 600,
+                borderRadius: '8px',
+                px: 3,
+                py: 1.5,
+                backgroundColor: getCompletionPercentage() === 100 ? '#3b82f6' : '#3b82f6',
+                fontFamily: 'var(--font-inter), sans-serif',
+                '&:hover': {
+                  backgroundColor: getCompletionPercentage() === 100 ? '#2563eb' : '#9ca3af'
+                },
+                '&:disabled': {
+                  backgroundColor: '#9ca3af',
+                  color: '#ffffff'
+                }
+              }}
+            >
+              {getCompletionPercentage() === 100 ? 'Complete Assessment' : 'Complete Assessment'}
+            </Button>
+          </Box>
+        </Box>
+      </Box>
+    </DashboardLayout>
+  );
+};
+
+export default AssessmentReview;
