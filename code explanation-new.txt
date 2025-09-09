@@ -1,0 +1,141 @@
+I'll explain the code in the current file `apps/user-portal/src/app/assessment/new/page.tsx`:
+
+## Overview
+This is an assessment form page that combines multiple templates into a single multi-section assessment.
+
+## Key Components & Flow
+
+### 1. **Data Sources & State**
+```typescript
+// Get templates data from store (set from previous page)
+const [templatesData, setTemplatesDataState] = useState(getTemplatesData());
+
+// Assessment state
+const [template, setTemplate] = useState<Template | null>(null);
+const [answers, setAnswers] = useState<Record<string, any>>({});
+const [currentSectionIndex, setCurrentSectionIndex] = useState(0);
+const [currentQuestionInSection, setCurrentQuestionInSection] = useState(0);
+```
+
+### 2. **Template Processing (`processTemplates` function)**
+This is the core logic that converts API templates into a unified structure:
+
+**Step 1: Deduplication**
+```typescript
+// Remove duplicates based on template name (case-insensitive)
+const uniqueTemplatesMap = new Map();
+templatesWithQuestionnaires.forEach((template: any) => {
+  const normalizedName = template.name?.trim().toLowerCase();
+  if (!uniqueTemplatesMap.has(normalizedName)) {
+    uniqueTemplatesMap.set(normalizedName, template);
+  }
+});
+```
+
+**Step 2: Create Combined Template**
+```typescript
+const combinedTemplate: Template = {
+  id: 'combined-assessment',
+  name: 'Multi-Template Assessment',
+  description: `Assessment with ${uniqueTemplates.length} template(s)`,
+  nodes: [], // Will contain sections + questions
+  edges: [], // Will contain question flow logic
+  // ...
+};
+```
+
+**Step 3: Convert Each Template to Section**
+```typescript
+uniqueTemplates.forEach((apiTemplate: any, index: number) => {
+  // Create section header
+  const sectionNode = {
+    id: `template-section-${index}`,
+    type: 'sectionNode',
+    data: {
+      sectionName: apiTemplate.name, // e.g., "Ambulatory Surgical Center"
+      sectionVersionId: apiTemplate.id // For API updates
+    }
+  };
+
+  // Add questions with prefixed IDs
+  apiTemplate.questionnaire.nodes.forEach((node: any) => {
+    if (node.type === 'questionNode') {
+      const prefixedNode = {
+        ...node,
+        id: `template-${index}-${node.id}`, // e.g., "template-0-2"
+        data: {
+          ...node.data,
+          templateSection: `template-section-${index}` // Link to section
+        }
+      };
+      combinedTemplate.nodes.push(prefixedNode);
+    }
+  });
+});
+```
+
+### 3. **Data Loading Logic**
+The main `useEffect` handles two scenarios:
+
+**Editing Existing Assessment:**
+```typescript
+if (templatesData.isEditing && templatesData.assessment) {
+  // Convert existing assessment sections back to template format
+  const formattedTemplates = assessmentData.sections.map((section, index) => ({
+    id: section.sectionId,
+    name: section.sectionName,
+    questionnaire: section.questionnaire,
+    // ... restore previous answers and progress
+  }));
+}
+```
+
+**New Assessment:**
+```typescript
+// Your selected code - filter active templates
+const availableTemplates = apiTemplates.filter(
+  (template) =>
+    template.status === 'ACTIVE' &&
+    template.isLatest &&
+    template.questionnaire &&
+    template.questionnaire.nodes &&
+    Array.isArray(template.questionnaire.nodes) &&
+    template.questionnaire.nodes.length > 0
+);
+```
+
+### 4. **Assessment Updates (`handleUpdateAssessment`)**
+Saves progress to backend:
+```typescript
+// Extract numeric questionId for API (removes "template-0-" prefix)
+const numericQuestionId = questionId.replace(/^template-\d+-/, '');
+return {
+  questionId: numericQuestionId, // Sends "2" instead of "template-0-2"
+  answer: answer || '',
+  answeredAt: new Date().toISOString()
+};
+```
+
+### 5. **Navigation Logic**
+```typescript
+const getSections = () => {
+  // Get all section nodes and sort them
+  const sections = template.nodes
+    .filter((n) => n.type === "sectionNode")
+    .sort(/* by section index */);
+    
+  return sections.map((section) => ({
+    ...section,
+    questions: getQuestionsForSection(section.id), // Get questions for each section
+  }));
+};
+```
+
+## Key Features:
+- **Multi-template support**: Combines multiple API templates into sections
+- **Progress tracking**: Saves answers and current position
+- **Edit mode**: Can resume existing assessments
+- **Question flow**: Maintains question ordering and conditional logic
+- **API compatibility**: Converts internal IDs back to clean format for backend
+
+The file essentially acts as a bridge between the API's template structure and a unified assessment interface.

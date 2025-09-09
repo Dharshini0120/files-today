@@ -1,0 +1,667 @@
+elaborated expl
+I'll explain the complete code in `apps/user-portal/src/app/assessment/new/page.tsx`:
+
+## File Structure & Imports
+
+```typescript
+'use client';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+// UI Components
+import { Box, Typography, Button, LinearProgress, Chip } from '@mui/material';
+// GraphQL & API
+import { useMutation } from '@apollo/client';
+import { UPDATE_ASSESSMENT_MUTATION } from '../../../graphql/assessment.service';
+// Store & Types
+import { getTemplatesData, clearTemplatesData } from '../../../store/templatesStore';
+import { Template } from '../../../types/template.types';
+// Shared Components
+import { withPageLoader } from '@frontend/shared-ui';
+```
+
+## Component Definition & State
+
+```typescript
+const NewAssessmentPage: React.FC = () => {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const assessmentId = searchParams.get('assessmentId'); // For editing existing assessments
+
+  // Component lifecycle state
+  const [mounted, setMounted] = useState(false);
+  const [isUserSet, setIsUserSet] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  // Templates and assessment data
+  const [templatesData, setTemplatesDataState] = useState(getTemplatesData());
+  const [template, setTemplate] = useState<Template | null>(null);
+  const [sectionVersionId, setSectionVersionId] = useState<string>('');
+
+  // User interaction state
+  const [answers, setAnswers] = useState<Record<string, any>>({});
+  const [currentSectionIndex, setCurrentSectionIndex] = useState(0);
+  const [currentQuestionInSection, setCurrentQuestionInSection] = useState(0);
+
+  // GraphQL mutation for updating assessments
+  const [updateAssessment] = useMutation(UPDATE_ASSESSMENT_MUTATION);
+```
+
+## Core Template Processing Function
+
+```typescript
+const processTemplates = useCallback(async (templatesWithQuestionnaires: any[]) => {
+  console.log('🔄 Processing templates:', templatesWithQuestionnaires);
+  setLoading(true);
+
+  // Step 1: Remove duplicate templates based on name
+  const uniqueTemplatesMap = new Map();
+  templatesWithQuestionnaires.forEach((template: any) => {
+    const normalizedName = template.name?.trim().toLowerCase();
+    if (!uniqueTemplatesMap.has(normalizedName)) {
+      console.log(`✅ Adding unique template: "${template.name}" (ID: ${template.id})`);
+      uniqueTemplatesMap.set(normalizedName, template);
+    } else {
+      console.log(`⚠️ Skipping duplicate template "${template.name}" (ID: ${template.id})`);
+    }
+  });
+
+  const uniqueTemplates = Array.from(uniqueTemplatesMap.values());
+
+  // Step 2: Validation
+  if (uniqueTemplates.length === 0) {
+    console.log('❌ No valid templates with questionnaires found');
+    alert("No valid templates found. Please try creating a new assessment from the main page.");
+    router.push("/assessment");
+    return;
+  }
+
+  // Step 3: Create combined template structure
+  const combinedTemplate: Template = {
+    id: 'combined-assessment',
+    name: 'Multi-Template Assessment',
+    description: `Assessment with ${uniqueTemplates.length} template(s)`,
+    nodes: [],
+    edges: [],
+    status: 'Completed',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  // Step 4: Process each unique template into sections
+  uniqueTemplates.forEach((apiTemplate: any, index: number) => {
+    console.log(`🔄 Processing template ${index + 1}: "${apiTemplate.name}"`);
+
+    // Create section header node
+    const sectionNode = {
+      id: `template-section-${index}`,
+      type: 'sectionNode',
+      position: { x: 0, y: index * 100 },
+      data: {
+        sectionName: apiTemplate.name, // e.g., "Ambulatory Surgical Center"
+        sectionVersionId: apiTemplate.id || apiTemplate._id // For API updates
+      }
+    };
+    combinedTemplate.nodes.push(sectionNode);
+
+    // Add questions from this template
+    if (apiTemplate.questionnaire?.nodes) {
+      apiTemplate.questionnaire.nodes.forEach((node: any) => {
+        if (node.type === 'questionNode') {
+          // Prefix node IDs to avoid conflicts between templates
+          const prefixedNode = {
+            ...node,
+            id: `template-${index}-${node.id}`, // "2" becomes "template-0-2"
+            data: {
+              ...node.data,
+              templateSection: `template-section-${index}` // Link to section
+            }
+          };
+          combinedTemplate.nodes.push(prefixedNode);
+        }
+      });
+    }
+
+    // Add edges (question flow logic) from this template
+    if (apiTemplate.questionnaire?.edges) {
+      apiTemplate.questionnaire.edges.forEach((edge: any) => {
+        const prefixedEdge = {
+          ...edge,
+          id: `template-${index}-${edge.id}`,
+          source: `template-${index}-${edge.source}`,
+          target: `template-${index}-${edge.target}`
+        };
+        combinedTemplate.edges.push(prefixedEdge);
+      });
+    }
+  });
+
+  console.log('🔄 Combined template:', combinedTemplate);
+  setTemplate(combinedTemplate);
+  setLoading(false);
+}, [router]);
+```
+
+## Main Data Loading Effect
+
+```typescript
+useEffect(() => {
+  console.log('🔄 useEffect triggered:', { mounted, isUserSet, templatesData: !!templatesData });
+  if (!mounted || !isUserSet) return;
+  
+  if (!templatesData) {
+    console.log('❌ No templates data available, redirecting to assessment page');
+    router.push("/assessment");
+    return;
+  }
+
+  const loadTemplateFromContextData = async () => {
+    try {
+      console.log('🔄 Loading template from context data...');
+
+      // SCENARIO 1: Editing existing assessment
+      if (templatesData.isEditing && templatesData.assessment) {
+        const assessmentData = templatesData.assessment;
+        
+        // Validate assessment data structure
+        if (!assessmentData.sections || !Array.isArray(assessmentData.sections)) {
+          alert("Invalid assessment data. Please try again.");
+          router.push("/assessment");
+          return;
+        }
+        
+        // Convert existing assessment sections back to template format
+        const formattedTemplates = assessmentData.sections.map((section: any, index: number) => {            
+          return {
+            id: section.sectionId || `section-${index}`,
+            name: section.sectionName || `Section ${index + 1}`,
+            questionnaire: section.questionnaire || { nodes: [], edges: [] },
+            version: '1.0',
+            facilityandservicelines: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            isExistingAssessment: true,
+            answers: section.answers || [],
+            progress: section.progress || {
+              currentQuestionIndex: 0,
+              totalQuestionsInSection: 0,
+              answeredQuestionsInSection: 0
+            }
+          };
+        });
+
+        // Process the existing assessment data
+        await processTemplates(formattedTemplates);
+        
+        // Restore progress state
+        if (assessmentData.overallProgress) {
+          setCurrentSectionIndex(assessmentData.overallProgress.currentSectionIndex || 0);
+          setCurrentQuestionInSection(assessmentData.overallProgress.currentQuestionIndex || 0);
+        }
+        
+        // Restore existing answers
+        if (assessmentData.sections) {
+          const existingAnswers: Record<string, any> = {};
+          assessmentData.sections.forEach((section: any) => {
+            if (section.answers && Array.isArray(section.answers)) {
+              section.answers.forEach((answer: any) => {
+                if (answer.questionId && answer.value !== undefined) {
+                  existingAnswers[answer.questionId] = answer.value;
+                }
+              });
+            }
+          });
+          setAnswers(existingAnswers);
+        }
+        return;
+      }
+
+      // SCENARIO 2: New assessment from templates
+      const apiTemplates = templatesData.scenarioVersions || [];
+      const assessmentData = templatesData.assessment;
+
+      console.log('📊 Assessment data:', assessmentData);
+      console.log('📊 Scenario versions:', apiTemplates);
+
+      // Filter for active templates with questionnaire data
+      const availableTemplates = apiTemplates.filter(
+        (template) =>
+          template.status === 'ACTIVE' &&
+          template.isLatest &&
+          template.questionnaire &&
+          template.questionnaire.nodes &&
+          Array.isArray(template.questionnaire.nodes) &&
+          template.questionnaire.nodes.length > 0
+      );
+
+      if (availableTemplates.length === 0) {
+        console.log('❌ No active templates with questionnaires found from context');
+        alert("No templates available for assessment. Please contact your administrator.");
+        router.push("/assessment");
+        return;
+      }
+
+      // Convert API templates to expected format
+      const formattedTemplates = availableTemplates.map(template => ({
+        id: template._id,
+        name: template.scenario.name,
+        questionnaire: template.questionnaire,
+        version: template.version,
+        facilityandservicelines: template.facilityandservicelines,
+        createdAt: template.createdAt,
+        updatedAt: template.updatedAt
+      }));
+
+      console.log('✅ Successfully loaded templates from context data:', formattedTemplates.length);
+
+      // Handle existing assessment progress if available
+      if (assessmentData && assessmentData.questionnaire) {
+        console.log('📊 Loading existing assessment progress...');
+        
+        // Extract section version ID from first section
+        if (assessmentData.questionnaire.length > 0) {
+          setSectionVersionId(assessmentData.questionnaire[0].sectionVersionId);
+        }
+      }
+
+      // Process the templates
+      await processTemplates(formattedTemplates);
+
+    } catch (e) {
+      console.error("❌ Error loading template from context data:", e);
+      alert("Failed to load template");
+      router.push("/dashboard");
+    }
+  };
+
+  loadTemplateFromContextData();
+}, [templatesData, router, processTemplates, mounted, isUserSet]);
+```
+
+## Lifecycle & Cleanup Effects
+
+```typescript
+// Initialize component state
+useEffect(() => {
+  setMounted(true);
+  setIsUserSet(true);
+}, []);
+
+// Fallback timeout for missing data
+useEffect(() => {
+  const timeout = setTimeout(() => {
+    if (!templatesData && mounted && isUserSet) {
+      console.log('⏰ Timeout reached, no templates data available, redirecting to assessment page');
+      router.push("/assessment");
+    }
+  }, 10000); // 10 second timeout
+
+  return () => clearTimeout(timeout);
+}, [templatesData, mounted, isUserSet, router]);
+
+// Cleanup templates data when component unmounts
+useEffect(() => {
+  return () => {
+    clearTemplatesData();
+  };
+}, []);
+```
+
+## Answer Handling
+
+```typescript
+const handleAnswerChange = (questionId: string, answer: any) => {
+  setAnswers((prev) => ({ ...prev, [questionId]: answer }));
+  setTimeout(() => {
+    const visible = getQuestionNodes();
+    if (currentQuestionIndex >= visible.length && visible.length > 0) {
+      setCurrentQuestionIndex(visible.length - 1);
+    }
+  }, 0);
+};
+```
+
+## Assessment Update Function
+
+```typescript
+const handleUpdateAssessment = async (isCompleted: boolean = false) => {
+  // Get assessment ID from URL or store
+  const currentAssessmentId = assessmentId || templatesData?.assessment?._id;
+  
+  console.log('🔍 Assessment ID sources:', {
+    fromURL: assessmentId,
+    fromStore: templatesData?.assessment?._id,
+    currentAssessmentId,
+    templatesData: templatesData
+  });
+  
+  if (!currentAssessmentId) {
+    console.log('No assessmentId found - this is a new assessment, skipping update for now');
+    return;
+  }
+
+  try {
+    console.log('🔄 Updating assessment...');
+    
+    // Get current answers
+    const currentAnswers = Object.entries(answers).map(([questionId, answer]) => ({
+      questionId,
+      answer: answer || '',
+      answeredAt: new Date().toISOString()
+    }));
+
+    // Calculate progress metrics
+    const questionNodes = getQuestionNodes();
+    const currentSectionQuestions = getCurrentSectionQuestions();
+    const totalQuestions = questionNodes.length;
+    const answeredQuestions = currentAnswers.length;
+    const overallProgress = calculateWeightedProgress()
+
+    // Create questionnaire sections for all sections
+    const sections = getSections();
+    const questionnaireSections = sections.map((section: any) => {
+      // Get answers for this specific section
+      const sectionAnswers = Object.entries(answers)
+        .filter(([questionId, answer]) => {
+          // Check if this question belongs to this section
+          const question = template?.nodes.find(n => n.id === questionId);
+          return question?.data?.templateSection === section.id;
+        })
+        .map(([questionId, answer]) => {
+          // Extract numeric part from template-X-Y format
+          const numericQuestionId = questionId.replace(/^template-\d+-/, '');
+          return {
+            questionId: numericQuestionId, // Send "2" instead of "template-0-2"
+            answer: answer || '',
+            answeredAt: new Date().toISOString()
+          };
+        });
+
+      // Get questions for this section
+      const sectionQuestions = section.questions || [];
+      
+      return {
+        sectionVersionId: section.data?.sectionVersionId || sectionVersionId || '68b18619e0337e146a5230bf',
+        answers: sectionAnswers,
+        progress: {
+          currentQuestionIndex: section.id === sections[currentSectionIndex]?.id ? currentQuestionInSection : 0,
+          totalQuestionsInSection: sectionQuestions.length,
+          answeredQuestionsInSection: sectionAnswers.length
+        }
+      };
+    });
+
+    // Create overall progress data
+    const overallProgressData = {
+      currentSectionIndex: currentSectionIndex,
+      totalSections: template?.nodes?.filter(node => node.type === 'sectionNode').length || 1,
+      overallProgress,
+      totalQuestions,
+      answeredQuestions
+    };
+
+    // Determine assessment status
+    let status = 'inProgress';
+    
+    if (isCompleted) {
+      // Check for "Refer to Consultant" answers
+      const questionNodes = getQuestionNodes();
+      let hasReferToConsultant = false;
+      
+      for (const question of questionNodes) {
+        const answer = answers[question.id];
+        if (answer) {
+          const answerStr = Array.isArray(answer) ? answer.join(' ') : answer;
+          if (answerStr && answerStr.toLowerCase().includes('refer to consultant')) {
+            hasReferToConsultant = true;
+            break;
+          }
+        }
+      }
+      
+      status = hasReferToConsultant ? 'requiresConsultation' : 'completed';
+    }
+
+    // Prepare update payload
+    const updatePayload = {
+      assessmentId: currentAssessmentId,
+      questionnaire: questionnaireSections,
+      overallProgress: overallProgressData,
+      status: status
+    };
+
+    console.log('📤 Sending update payload:', updatePayload);
+
+    // Execute GraphQL mutation
+    const result = await updateAssessment({
+      variables: { input: updatePayload }
+    });
+
+    console.log('✅ Assessment updated successfully:', result);
+
+    if (isCompleted) {
+      // Navigate to completion page
+      router.push(`/assessment/complete?assessmentId=${currentAssessmentId}&status=${status}`);
+    }
+
+  } catch (error) {
+    console.error('❌ Error updating assessment:', error);
+    // Handle error appropriately
+  }
+};
+```
+
+## Helper Functions (Memoized)
+
+```typescript
+// Get all question nodes from current template
+const getQuestionNodes = useMemo(() => {
+  if (!template) return [];
+  return template.nodes.filter((node) => node.type === 'questionNode');
+}, [template]);
+
+// Get all section nodes
+const getSections = useMemo(() => {
+  if (!template) return [];
+  
+  const sections = template.nodes
+    .filter((n) => n.type === "sectionNode")
+    .sort((a, b) => {
+      const aIndex = parseInt(a.id.split('-')[2] || '0');
+      const bIndex = parseInt(b.id.split('-')[2] || '0');
+      return aIndex - bIndex;
+    });
+    
+  return sections.map((section) => ({
+    ...section,
+    questions: getQuestionsForSection(section.id),
+  }));
+}, [template]);
+
+// Get questions for a specific section
+const getQuestionsForSection = useCallback((sectionId: string) => {
+  if (!template) return [];
+  return template.nodes.filter(
+    (node) => node.type === 'questionNode' && node.data?.templateSection === sectionId
+  );
+}, [template]);
+
+// Get questions for current section
+const getCurrentSectionQuestions = useMemo(() => {
+  const sections = getSections();
+  if (sections.length === 0) return [];
+  return sections[currentSectionIndex]?.questions || [];
+}, [getSections, currentSectionIndex]);
+
+// Calculate weighted progress across all sections
+const calculateWeightedProgress = useCallback(() => {
+  const sections = getSections();
+  if (sections.length === 0) return 0;
+
+  let totalWeight = 0;
+  let completedWeight = 0;
+
+  sections.forEach((section, index) => {
+    const sectionQuestions = section.questions || [];
+    const sectionWeight = sectionQuestions.length;
+    totalWeight += sectionWeight;
+
+    // Count answered questions in this section
+    const answeredInSection = sectionQuestions.filter(q => answers[q.id]).length;
+    completedWeight += answeredInSection;
+  });
+
+  return totalWeight > 0 ? Math.round((completedWeight / totalWeight) * 100) : 0;
+}, [getSections, answers]);
+```
+
+## Navigation Functions
+
+```typescript
+// Navigate to next question/section
+const handleNext = useCallback(() => {
+  const sections = getSections();
+  const currentSectionQuestions = getCurrentSectionQuestions();
+  
+  if (currentQuestionInSection < currentSectionQuestions.length - 1) {
+    // Move to next question in current section
+    setCurrentQuestionInSection(prev => prev + 1);
+  } else if (currentSectionIndex < sections.length - 1) {
+    // Move to next section
+    setCurrentSectionIndex(prev => prev + 1);
+    setCurrentQuestionInSection(0);
+  }
+  
+  // Auto-save progress
+  handleUpdateAssessment(false);
+}, [currentQuestionInSection, currentSectionIndex, getCurrentSectionQuestions, getSections, handleUpdateAssessment]);
+
+// Navigate to previous question/section
+const handlePrevious = useCallback(() => {
+  if (currentQuestionInSection > 0) {
+    // Move to previous question in current section
+    setCurrentQuestionInSection(prev => prev - 1);
+  } else if (currentSectionIndex > 0) {
+    // Move to previous section
+    const sections = getSections();
+    const prevSectionIndex = currentSectionIndex - 1;
+    const prevSectionQuestions = sections[prevSectionIndex]?.questions || [];
+    
+    setCurrentSectionIndex(prevSectionIndex);
+    setCurrentQuestionInSection(Math.max(0, prevSectionQuestions.length - 1));
+  }
+}, [currentQuestionInSection, currentSectionIndex, getSections]);
+
+// Submit final assessment
+const handleSubmit = useCallback(async () => {
+  await handleUpdateAssessment(true); // Mark as completed
+}, [handleUpdateAssessment]);
+```
+
+## Render Logic
+
+```typescript
+// Show loading state
+if (loading || !template) {
+  return (
+    <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+      <Typography>Loading assessment...</Typography>
+    </Box>
+  );
+}
+
+const sections = getSections();
+const currentSectionQuestions = getCurrentSectionQuestions();
+const currentQuestion = currentSectionQuestions[currentQuestionInSection];
+const overallProgress = calculateWeightedProgress();
+
+return (
+  <Box sx={{ maxWidth: 800, mx: 'auto', p: 3 }}>
+    {/* Header with progress */}
+    <Box sx={{ mb: 4 }}>
+      <Typography variant="h4" gutterBottom>
+        {template.name}
+      </Typography>
+      
+      {/* Progress bar */}
+      <Box sx={{ mb: 2 }}>
+        <Typography variant="body2" color="text.secondary" gutterBottom>
+          Overall Progress: {overallProgress}%
+        </Typography>
+        <LinearProgress variant="determinate" value={overallProgress} />
+      </Box>
+
+      {/* Section indicator */}
+      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+        {sections.map((section, index) => (
+          <Chip
+            key={section.id}
+            label={`${section.data.sectionName} (${index + 1}/${sections.length})`}
+            variant={index === currentSectionIndex ? 'filled' : 'outlined'}
+            color={index === currentSectionIndex ? 'primary' : 'default'}
+          />
+        ))}
+      </Box>
+    </Box>
+
+    {/* Current question */}
+    {currentQuestion && (
+      <Box sx={{ mb: 4 }}>
+        <Typography variant="h6" gutterBottom>
+          Question {currentQuestionInSection + 1} of {currentSectionQuestions.length}
+        </Typography>
+        
+        {/* Question component would be rendered here */}
+        <QuestionRenderer
+          question={currentQuestion}
+          answer={answers[currentQuestion.id]}
+          onAnswerChange={(answer) => handleAnswerChange(currentQuestion.id, answer)}
+        />
+      </Box>
+    )}
+
+    {/* Navigation buttons */}
+    <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 4 }}>
+      <Button
+        variant="outlined"
+        onClick={handlePrevious}
+        disabled={currentSectionIndex === 0 && currentQuestionInSection === 0}
+      >
+        Previous
+      </Button>
+      
+      {/* Show Submit button on last question */}
+      {currentSectionIndex === sections.length - 1 && 
+       currentQuestionInSection === currentSectionQuestions.length - 1 ? (
+        <Button variant="contained" onClick={handleSubmit}>
+          Submit Assessment
+        </Button>
+      ) : (
+        <Button variant="contained" onClick={handleNext}>
+          Next
+        </Button>
+      )}
+    </Box>
+  </Box>
+);
+```
+
+## Export
+
+```typescript
+export default withPageLoader(NewAssessmentPage);
+```
+
+## Summary
+
+This file is a comprehensive assessment form that:
+
+1. **Loads templates** from store (populated by previous page)
+2. **Combines multiple templates** into a single multi-section assessment
+3. **Handles both new and edit modes** for assessments
+4. **Tracks progress** across sections and questions
+5. **Saves answers** automatically and on navigation
+6. **Manages question flow** with next/previous navigation
+7. **Submits final assessment** with status determination
+8. **Converts IDs** between internal format (`template-0-2`) and API format (`2`)
+
+The key innovation is the template combination logic that allows users to take assessments spanning multiple healthcare templates in a single unified interface.
